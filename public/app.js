@@ -9,6 +9,7 @@ const ctx = canvas.getContext("2d");
 const DEFAULT_PUBLIC_SERVER = "wss://serverbloom-snake-arena.onrender.com/ws";
 const LOCAL_TICK_MS = 125;
 const GOLD_MOVE_EVERY_TICKS = 4;
+const GOLD_SCORE_THRESHOLD = 100;
 
 const DIRECTIONS = Object.freeze({
   up: { x: 0, y: -1 },
@@ -23,27 +24,40 @@ const FOOD_TYPES = Object.freeze({
     label: "淡粉櫻花",
     color: "#ffb7d5",
     center: "#fff0f7",
-    score: 1,
+    score: 5,
     growth: 1,
-    moving: false
+    moving: false,
+    weight: 0.4
+  },
+  gray: {
+    type: "gray",
+    label: "灰色櫻花",
+    color: "#9ca3af",
+    center: "#f3f4f6",
+    score: 10,
+    growth: 1,
+    moving: false,
+    weight: 0.25
   },
   lavender: {
     type: "lavender",
     label: "淡紫櫻花",
     color: "#c9b3ff",
     center: "#fff6ff",
-    score: 1,
+    score: 10,
     growth: 1,
-    moving: false
+    moving: false,
+    weight: 0.2
   },
   purple: {
     type: "purple",
     label: "深紫櫻花",
     color: "#6d28d9",
     center: "#eadcff",
-    score: 1,
+    score: 20,
     growth: 1,
-    moving: false
+    moving: false,
+    weight: 0.15
   },
   gold: {
     type: "gold",
@@ -52,7 +66,8 @@ const FOOD_TYPES = Object.freeze({
     center: "#fff4b8",
     score: 3,
     growth: 3,
-    moving: true
+    moving: true,
+    weight: 0
   }
 });
 
@@ -91,9 +106,10 @@ const state = {
     direction: { ...DIRECTIONS.right },
     nextDirection: { ...DIRECTIONS.right },
     score: 0,
-    color: FOOD_TYPES.pink.color,
+    color: FOOD_TYPES.lavender.color,
     food: null,
-    growthRemaining: 0,
+    growthColors: [],
+    nextGoldAt: GOLD_SCORE_THRESHOLD,
     tickCount: 0,
     round: 0
   }
@@ -142,13 +158,14 @@ function startSinglePractice() {
   state.local.direction = { ...DIRECTIONS.right };
   state.local.nextDirection = { ...DIRECTIONS.right };
   state.local.score = 0;
-  state.local.color = FOOD_TYPES.pink.color;
-  state.local.growthRemaining = 0;
+  state.local.color = FOOD_TYPES.lavender.color;
+  state.local.growthColors = [];
+  state.local.nextGoldAt = GOLD_SCORE_THRESHOLD;
   state.local.tickCount = 0;
 
   const startX = Math.max(8, Math.floor(state.cols * 0.3));
   const startY = Math.floor(state.rows / 2);
-  state.local.snake = makeSnake(startX, startY, DIRECTIONS.right, 4);
+  state.local.snake = makeSnake(startX, startY, DIRECTIONS.right, 4, state.local.color);
   state.local.food = spawnLocalFood();
 
   syncLocalState();
@@ -159,7 +176,7 @@ function startSinglePractice() {
   $("#modeLabel").textContent = `單人練習・第 ${state.local.round} 局`;
   setConnection("local", "本機模式");
   $("#latencyText").textContent = "離線";
-  setStatus("方向鍵／WASD 控制。一般櫻花 +1；會移動的金色櫻花 +3。");
+  setStatus("淡粉 5 分｜灰色 10 分｜淡紫 10 分｜深紫 20 分；累積滿 100 分出現會移動的金色櫻花。");
   showOverlay("none");
 
   clearInterval(state.local.timer);
@@ -179,30 +196,41 @@ function tickLocalGame() {
     y: head.y + local.direction.y
   };
 
-  const bodyToCheck = local.growthRemaining > 0
-    ? local.snake
-    : local.snake.slice(0, -1);
+  const ateFood = samePoint(target, local.food);
+  const willGrow = ateFood || local.growthColors.length > 0;
+  const bodyToCheck = willGrow ? local.snake : local.snake.slice(0, -1);
 
   if (outsideBoard(target) || bodyToCheck.some((segment) => samePoint(segment, target))) {
     endSinglePractice(outsideBoard(target) ? "撞到邊界" : "撞到自己");
     return;
   }
 
-  const ateFood = samePoint(target, local.food);
-  local.snake.unshift(target);
-
   if (ateFood) {
     const effect = foodEffect(local.food);
     local.score += effect.score;
     local.color = effect.color;
-    local.growthRemaining += effect.growth;
-    showToast(`${effect.label}：+${effect.score} 分・+${effect.growth} 長度`);
+
+    for (let index = 0; index < effect.growth; index += 1) {
+      local.growthColors.push(effect.color);
+    }
+
+    let spawnGold = false;
+    while (local.score >= local.nextGoldAt) {
+      spawnGold = true;
+      local.nextGoldAt += GOLD_SCORE_THRESHOLD;
+    }
+
+    showToast(`${effect.label}：+${effect.score} 分・新增 ${effect.growth} 節${effect.type === "gold" ? "金色" : ""}蛇身`);
     playFoodTone(effect.type);
-    local.food = spawnLocalFood();
+    local.food = spawnLocalFood(spawnGold);
   }
 
-  if (local.growthRemaining > 0) local.growthRemaining -= 1;
-  else local.snake.pop();
+  local.snake = moveColoredSnake(
+    local.snake,
+    target,
+    local.growthColors,
+    local.color
+  );
 
   local.tickCount += 1;
   if (local.food?.type === "gold" && local.tickCount % GOLD_MOVE_EVERY_TICKS === 0) {
@@ -269,23 +297,15 @@ function syncLocalState(alive = true) {
   $("#aliveCount").textContent = alive ? "1 / 1" : "0 / 1";
 }
 
-function spawnLocalFood() {
-  const roll = Math.random();
-  const type = roll < 0.32
-    ? "pink"
-    : roll < 0.6
-      ? "lavender"
-      : roll < 0.85
-        ? "purple"
-        : "gold";
-
-  const effect = FOOD_TYPES[type];
+function spawnLocalFood(forceGold = false) {
+  const effect = forceGold ? FOOD_TYPES.gold : pickNormalFoodType();
   const occupied = new Set(state.local.snake.map(pointKey));
   const point = findFreePoint(occupied);
   return {
     ...point,
     id: `local-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
-    type,
+    type: effect.type,
+    label: effect.label,
     color: effect.color,
     center: effect.center,
     score: effect.score,
@@ -293,6 +313,19 @@ function spawnLocalFood() {
     moving: effect.moving,
     direction: effect.moving ? randomDirection() : null
   };
+}
+
+function pickNormalFoodType() {
+  const normalFoods = Object.values(FOOD_TYPES).filter((effect) => effect.type !== "gold");
+  const roll = Math.random();
+  let accumulated = 0;
+
+  for (const effect of normalFoods) {
+    accumulated += effect.weight;
+    if (roll < accumulated) return effect;
+  }
+
+  return FOOD_TYPES.pink;
 }
 
 function moveGoldenFood() {
@@ -846,11 +879,13 @@ function drawPlayer(player) {
     const y = state.offsetY + part.y * state.cell + state.cell * 0.1;
     const size = state.cell * 0.8;
 
+    const segmentColor = String(part.color || playerColor);
+
     ctx.save();
     ctx.globalAlpha = player.alive ? 1 : 0.22;
-    ctx.shadowColor = playerColor;
+    ctx.shadowColor = segmentColor;
     ctx.shadowBlur = isHead ? 16 : 6;
-    ctx.fillStyle = playerColor;
+    ctx.fillStyle = segmentColor;
     roundedRect(x, y, size, size, isHead ? state.cell * 0.28 : state.cell * 0.22);
     ctx.fill();
 
@@ -920,15 +955,33 @@ function foodEffect(food) {
   };
 }
 
-function makeSnake(headX, headY, direction, length) {
+function makeSnake(headX, headY, direction, length, color = null) {
   const snake = [];
   for (let index = 0; index < length; index += 1) {
-    snake.push({
+    const segment = {
       x: headX - direction.x * index,
       y: headY - direction.y * index
-    });
+    };
+    if (color) segment.color = color;
+    snake.push(segment);
   }
   return snake;
+}
+
+function moveColoredSnake(snake, target, growthColors, fallbackColor) {
+  const oldColors = snake.map((segment) => String(segment.color || fallbackColor));
+  const shouldGrow = growthColors.length > 0;
+  const nextPositions = shouldGrow
+    ? [{ x: target.x, y: target.y }, ...snake.map(({ x, y }) => ({ x, y }))]
+    : [{ x: target.x, y: target.y }, ...snake.slice(0, -1).map(({ x, y }) => ({ x, y }))];
+
+  const nextColors = oldColors.slice();
+  if (shouldGrow) nextColors.push(String(growthColors.shift() || fallbackColor));
+
+  return nextPositions.map((segment, index) => ({
+    ...segment,
+    color: nextColors[index] || fallbackColor
+  }));
 }
 
 function randomDirection() {
@@ -1018,7 +1071,7 @@ function playFoodTone(type) {
     [760, 980, 1240].forEach((frequency, index) => playTone(frequency, 0.13, "triangle", 0.032, index * 0.045));
     return;
   }
-  const frequencies = { pink: 720, lavender: 790, purple: 650 };
+  const frequencies = { pink: 720, gray: 540, lavender: 790, purple: 650 };
   playTone(frequencies[type] || 720, 0.09, "triangle", 0.022);
 }
 
