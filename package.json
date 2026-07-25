@@ -1,0 +1,16 @@
+{
+  "name": "serverbloom-snake-arena",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "ServerBloom Snake Arena - authoritative public multiplayer snake arena",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "node --test"
+  },
+  "dependencies": {}
+}
