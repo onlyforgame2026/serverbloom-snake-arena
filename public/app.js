@@ -1160,7 +1160,7 @@ window.addEventListener("beforeunload", () => {
   if (state.socket?.readyState === WebSocket.OPEN) state.socket.close(1000, "Page closing");
 });
 
-$("#nameInput").value = localStorage.getItem("serverbloom_snake_name") || "";
+$("#nameInput").value = localStorage.getItem("serverbloom_snake_name") || "ServerBloom";
 resizeCanvas();
 returnToMenu();
 requestAnimationFrame(renderFrame);
