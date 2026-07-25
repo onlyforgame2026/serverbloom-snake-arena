@@ -13,7 +13,7 @@ const WS_PATH = "/ws";
 const COLS = readInt("BOARD_COLS", 72, 36, 120);
 const ROWS = readInt("BOARD_ROWS", 40, 24, 80);
 const MAX_PLAYERS = readInt("MAX_PLAYERS", 12, 2, 20);
-const COUNTDOWN_SECONDS = readInt("COUNTDOWN_SECONDS", 7, 3, 15);
+const COUNTDOWN_SECONDS = readInt("COUNTDOWN_SECONDS", 3, 3, 15);
 const TICK_MS = readInt("TICK_MS", 125, 70, 300);
 const MAX_MESSAGE_BYTES = 2_048;
 const MAX_MESSAGES_PER_SECOND = 40;
@@ -30,36 +30,47 @@ const COLORS = [
 ];
 
 const GOLD_MOVE_EVERY_TICKS = 4;
+const GOLD_SCORE_THRESHOLD = 100;
 const FOOD_TYPES = Object.freeze({
   pink: {
     type: "pink",
     label: "淡粉櫻花",
     color: "#ffb7d5",
     center: "#fff0f7",
-    score: 1,
+    score: 5,
     growth: 1,
     moving: false,
-    weight: 0.32
+    weight: 0.4
+  },
+  gray: {
+    type: "gray",
+    label: "灰色櫻花",
+    color: "#9ca3af",
+    center: "#f3f4f6",
+    score: 10,
+    growth: 1,
+    moving: false,
+    weight: 0.25
   },
   lavender: {
     type: "lavender",
     label: "淡紫櫻花",
     color: "#c9b3ff",
     center: "#fff6ff",
-    score: 1,
+    score: 10,
     growth: 1,
     moving: false,
-    weight: 0.28
+    weight: 0.2
   },
   purple: {
     type: "purple",
     label: "深紫櫻花",
     color: "#6d28d9",
     center: "#eadcff",
-    score: 1,
+    score: 20,
     growth: 1,
     moving: false,
-    weight: 0.25
+    weight: 0.15
   },
   gold: {
     type: "gold",
@@ -69,7 +80,7 @@ const FOOD_TYPES = Object.freeze({
     score: 3,
     growth: 3,
     moving: true,
-    weight: 0.15
+    weight: 0
   }
 });
 
@@ -91,7 +102,9 @@ const arena = {
   tickTimer: null,
   countdownTimer: null,
   lastResult: null,
-  tickCount: 0
+  tickCount: 0,
+  totalScore: 0,
+  nextGoldAt: GOLD_SCORE_THRESHOLD
 };
 
 const server = http.createServer(async (request, response) => {
@@ -273,7 +286,7 @@ function handleJoin(socket, message) {
     nextDirection: { ...DIRECTIONS.right },
     alive: false,
     score: 0,
-    growthRemaining: 0,
+    growthColors: [],
     wins: 0,
     deathReason: ""
   };
@@ -326,7 +339,7 @@ function beginCountdown() {
     player.status = "waiting";
     player.alive = false;
     player.snake = [];
-    player.growthRemaining = 0;
+    player.growthColors = [];
     player.deathReason = "";
   }
 
@@ -367,21 +380,23 @@ function startRound() {
   arena.mode = participants.length >= 2 ? "ranked" : "practice";
   arena.lastResult = null;
   arena.tickCount = 0;
+  arena.totalScore = 0;
+  arena.nextGoldAt = GOLD_SCORE_THRESHOLD;
 
   const slots = createSpawnSlots(participants.length);
   participants.forEach((player, index) => {
     const slot = slots[index];
     player.direction = { ...slot.direction };
     player.nextDirection = { ...slot.direction };
-    player.snake = makeSnake(slot.x, slot.y, slot.direction, 4);
+    player.snake = makeSnake(slot.x, slot.y, slot.direction, 4, player.color);
     player.alive = true;
     player.status = "alive";
     player.score = 0;
-    player.growthRemaining = 0;
+    player.growthColors = [];
     player.deathReason = "";
   });
 
-  arena.food = spawnFood();
+  arena.food = spawnFood(false);
   broadcastState();
   broadcastArena();
 
@@ -408,7 +423,7 @@ function tickGame() {
       y: head.y + player.direction.y
     };
     const growing = samePoint(target, arena.food);
-    const keepingTail = growing || player.growthRemaining > 0;
+    const keepingTail = growing || player.growthColors.length > 0;
     plans.set(player.id, { player, head, target, growing, keepingTail });
 
     const key = pointKey(target);
@@ -465,6 +480,7 @@ function tickGame() {
   }
 
   let foodWasEaten = false;
+  let spawnGold = false;
 
   for (const plan of plans.values()) {
     const player = plan.player;
@@ -475,22 +491,34 @@ function tickGame() {
       continue;
     }
 
-    player.snake.unshift(plan.target);
     if (plan.growing) {
       const effect = foodEffect(arena.food);
       player.score += effect.score;
-      player.color = effect.color;
-      player.growthRemaining += effect.growth;
+      arena.totalScore += effect.score;
+
+      for (let index = 0; index < effect.growth; index += 1) {
+        player.growthColors.push(effect.color);
+      }
+
+      while (arena.totalScore >= arena.nextGoldAt) {
+        spawnGold = true;
+        arena.nextGoldAt += GOLD_SCORE_THRESHOLD;
+      }
+
       foodWasEaten = true;
     }
 
-    if (player.growthRemaining > 0) player.growthRemaining -= 1;
-    else player.snake.pop();
+    player.snake = moveColoredSnake(
+      player.snake,
+      plan.target,
+      player.growthColors,
+      player.color
+    );
   }
 
   arena.tickCount += 1;
   if (foodWasEaten) {
-    arena.food = spawnFood();
+    arena.food = spawnFood(spawnGold);
   } else if (arena.food?.type === "gold" && arena.tickCount % GOLD_MOVE_EVERY_TICKS === 0) {
     moveGoldenFood();
   }
@@ -582,6 +610,8 @@ function resetArenaToWaiting() {
   arena.countdownLastValue = null;
   arena.lastResult = null;
   arena.tickCount = 0;
+  arena.totalScore = 0;
+  arena.nextGoldAt = GOLD_SCORE_THRESHOLD;
   broadcastArena();
 }
 
@@ -612,6 +642,8 @@ function broadcastState() {
     cols: COLS,
     rows: ROWS,
     food: arena.food,
+    totalScore: arena.totalScore,
+    nextGoldAt: arena.nextGoldAt,
     players: serializePlayers(true),
     serverTime: Date.now()
   });
@@ -671,21 +703,39 @@ function createSpawnSlots(count) {
   return slots.slice(0, count);
 }
 
-function makeSnake(headX, headY, direction, length) {
+function makeSnake(headX, headY, direction, length, color = null) {
   const snake = [];
   for (let index = 0; index < length; index += 1) {
-    snake.push({
+    const segment = {
       x: headX - direction.x * index,
       y: headY - direction.y * index
-    });
+    };
+    if (color) segment.color = color;
+    snake.push(segment);
   }
   return snake;
 }
 
-function spawnFood() {
+function moveColoredSnake(snake, target, growthColors, fallbackColor) {
+  const oldColors = snake.map((segment) => String(segment.color || fallbackColor));
+  const shouldGrow = growthColors.length > 0;
+  const nextPositions = shouldGrow
+    ? [{ x: target.x, y: target.y }, ...snake.map(({ x, y }) => ({ x, y }))]
+    : [{ x: target.x, y: target.y }, ...snake.slice(0, -1).map(({ x, y }) => ({ x, y }))];
+
+  const nextColors = oldColors.slice();
+  if (shouldGrow) nextColors.push(String(growthColors.shift() || fallbackColor));
+
+  return nextPositions.map((segment, index) => ({
+    ...segment,
+    color: nextColors[index] || fallbackColor
+  }));
+}
+
+function spawnFood(forceGold = false) {
   const occupied = occupiedCells();
   const point = findFreePoint(occupied);
-  const effect = pickFoodType();
+  const effect = forceGold ? FOOD_TYPES.gold : pickNormalFoodType();
 
   return {
     ...point,
@@ -723,13 +773,16 @@ function moveGoldenFood() {
   food.direction = randomDirection();
 }
 
-function pickFoodType() {
+function pickNormalFoodType() {
   const roll = Math.random();
   let accumulated = 0;
+
   for (const effect of Object.values(FOOD_TYPES)) {
+    if (effect.type === "gold") continue;
     accumulated += effect.weight;
     if (roll < accumulated) return effect;
   }
+
   return FOOD_TYPES.pink;
 }
 
