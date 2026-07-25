@@ -6,7 +6,58 @@ const $$ = (selector) => [...document.querySelectorAll(selector)];
 const canvas = $("#gameCanvas");
 const ctx = canvas.getContext("2d");
 
+const DEFAULT_PUBLIC_SERVER = "wss://serverbloom-snake-arena.onrender.com/ws";
+const LOCAL_TICK_MS = 125;
+const GOLD_MOVE_EVERY_TICKS = 4;
+
+const DIRECTIONS = Object.freeze({
+  up: { x: 0, y: -1 },
+  down: { x: 0, y: 1 },
+  left: { x: -1, y: 0 },
+  right: { x: 1, y: 0 }
+});
+
+const FOOD_TYPES = Object.freeze({
+  pink: {
+    type: "pink",
+    label: "淡粉櫻花",
+    color: "#ffb7d5",
+    center: "#fff0f7",
+    score: 1,
+    growth: 1,
+    moving: false
+  },
+  lavender: {
+    type: "lavender",
+    label: "淡紫櫻花",
+    color: "#c9b3ff",
+    center: "#fff6ff",
+    score: 1,
+    growth: 1,
+    moving: false
+  },
+  purple: {
+    type: "purple",
+    label: "深紫櫻花",
+    color: "#6d28d9",
+    center: "#eadcff",
+    score: 1,
+    growth: 1,
+    moving: false
+  },
+  gold: {
+    type: "gold",
+    label: "金色櫻花",
+    color: "#f6c453",
+    center: "#fff4b8",
+    score: 3,
+    growth: 3,
+    moving: true
+  }
+});
+
 const state = {
+  mode: "menu",
   socket: null,
   reconnectTimer: null,
   pingTimer: null,
@@ -31,7 +82,21 @@ const state = {
   offsetY: 0,
   soundEnabled: true,
   audioContext: null,
-  lastFoodKey: ""
+  lastFoodKey: "",
+  publicVisualColors: new Map(),
+  local: {
+    timer: null,
+    running: false,
+    snake: [],
+    direction: { ...DIRECTIONS.right },
+    nextDirection: { ...DIRECTIONS.right },
+    score: 0,
+    color: FOOD_TYPES.pink.color,
+    food: null,
+    growthRemaining: 0,
+    tickCount: 0,
+    round: 0
+  }
 };
 
 function websocketUrl() {
@@ -41,12 +106,231 @@ function websocketUrl() {
       const parsed = new URL(supplied);
       if (parsed.protocol === "ws:" || parsed.protocol === "wss:") return parsed.toString();
     } catch {
-      // Fall through to same-origin WebSocket.
+      // Use the normal default below.
     }
   }
 
+  if (location.hostname.endsWith("github.io")) return DEFAULT_PUBLIC_SERVER;
+
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
   return `${protocol}//${location.host}/ws`;
+}
+
+function openPublicJoin() {
+  stopLocalGame();
+  closeSocket(false);
+  state.mode = "public";
+  state.manualLeave = true;
+  resetSharedGameState();
+  setConnection("idle", "尚未連線");
+  $("#latencyText").textContent = "—";
+  $("#modeLabel").textContent = "唯一公開戰局";
+  setStatus("輸入名稱後加入唯一公開戰局。");
+  showOverlay("publicJoin");
+  setTimeout(() => $("#nameInput").focus(), 80);
+}
+
+function startSinglePractice() {
+  state.manualLeave = true;
+  closeSocket(true);
+  resetSharedGameState();
+  stopLocalGame();
+
+  state.mode = "single";
+  state.local.round += 1;
+  state.local.running = true;
+  state.local.direction = { ...DIRECTIONS.right };
+  state.local.nextDirection = { ...DIRECTIONS.right };
+  state.local.score = 0;
+  state.local.color = FOOD_TYPES.pink.color;
+  state.local.growthRemaining = 0;
+  state.local.tickCount = 0;
+
+  const startX = Math.max(8, Math.floor(state.cols * 0.3));
+  const startY = Math.floor(state.rows / 2);
+  state.local.snake = makeSnake(startX, startY, DIRECTIONS.right, 4);
+  state.local.food = spawnLocalFood();
+
+  syncLocalState();
+  $("#leaveButton").hidden = false;
+  $("#playerList").hidden = true;
+  $("#spectatorBanner").hidden = true;
+  $("#touchControls").hidden = false;
+  $("#modeLabel").textContent = `單人練習・第 ${state.local.round} 局`;
+  setConnection("local", "本機模式");
+  $("#latencyText").textContent = "離線";
+  setStatus("方向鍵／WASD 控制。一般櫻花 +1；會移動的金色櫻花 +3。");
+  showOverlay("none");
+
+  clearInterval(state.local.timer);
+  state.local.timer = setInterval(tickLocalGame, LOCAL_TICK_MS);
+}
+
+function tickLocalGame() {
+  if (!state.local.running || state.mode !== "single") return;
+
+  const local = state.local;
+  const proposed = local.nextDirection;
+  if (!isOpposite(local.direction, proposed)) local.direction = { ...proposed };
+
+  const head = local.snake[0];
+  const target = {
+    x: head.x + local.direction.x,
+    y: head.y + local.direction.y
+  };
+
+  const bodyToCheck = local.growthRemaining > 0
+    ? local.snake
+    : local.snake.slice(0, -1);
+
+  if (outsideBoard(target) || bodyToCheck.some((segment) => samePoint(segment, target))) {
+    endSinglePractice(outsideBoard(target) ? "撞到邊界" : "撞到自己");
+    return;
+  }
+
+  const ateFood = samePoint(target, local.food);
+  local.snake.unshift(target);
+
+  if (ateFood) {
+    const effect = foodEffect(local.food);
+    local.score += effect.score;
+    local.color = effect.color;
+    local.growthRemaining += effect.growth;
+    showToast(`${effect.label}：+${effect.score} 分・+${effect.growth} 長度`);
+    playFoodTone(effect.type);
+    local.food = spawnLocalFood();
+  }
+
+  if (local.growthRemaining > 0) local.growthRemaining -= 1;
+  else local.snake.pop();
+
+  local.tickCount += 1;
+  if (local.food?.type === "gold" && local.tickCount % GOLD_MOVE_EVERY_TICKS === 0) {
+    moveGoldenFood();
+  }
+
+  syncLocalState();
+}
+
+function endSinglePractice(reason) {
+  stopLocalGame();
+  const local = state.local;
+  syncLocalState(false);
+  $("#resultIcon").textContent = "🌸";
+  $("#resultTitle").textContent = "單人練習結束";
+  $("#resultMessage").textContent = `${reason}。本局不計排名與勝場。`;
+  $("#resultTable").innerHTML = `
+    <div class="result-row">
+      <span class="result-rank">#1</span>
+      <span class="player-color" style="--player-color:${escapeAttribute(local.color)}"></span>
+      <span class="result-name">你</span>
+      <span class="result-score">${local.score} 分・長度 ${local.snake.length}</span>
+    </div>`;
+  $("#nextRoundChip").hidden = true;
+  $("#singleResultActions").hidden = false;
+  $("#touchControls").hidden = true;
+  setStatus(`單人練習結束：${reason}。`);
+  showOverlay("result");
+  playEndSound(false);
+}
+
+function stopLocalGame() {
+  clearInterval(state.local.timer);
+  state.local.timer = null;
+  state.local.running = false;
+}
+
+function syncLocalState(alive = true) {
+  const local = state.local;
+  state.playerId = "local-player";
+  state.game = {
+    status: local.running ? "playing" : "ended",
+    round: local.round,
+    mode: "practice",
+    cols: state.cols,
+    rows: state.rows,
+    food: local.food,
+    players: [{
+      id: "local-player",
+      name: "你",
+      color: local.color,
+      displayColor: local.color,
+      status: alive ? "alive" : "dead",
+      alive,
+      score: local.score,
+      wins: 0,
+      snake: local.snake,
+      direction: local.direction
+    }]
+  };
+
+  $("#myScore").textContent = local.score;
+  $("#myWins").textContent = "0";
+  $("#aliveCount").textContent = alive ? "1 / 1" : "0 / 1";
+}
+
+function spawnLocalFood() {
+  const roll = Math.random();
+  const type = roll < 0.32
+    ? "pink"
+    : roll < 0.6
+      ? "lavender"
+      : roll < 0.85
+        ? "purple"
+        : "gold";
+
+  const effect = FOOD_TYPES[type];
+  const occupied = new Set(state.local.snake.map(pointKey));
+  const point = findFreePoint(occupied);
+  return {
+    ...point,
+    id: `local-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+    type,
+    color: effect.color,
+    center: effect.center,
+    score: effect.score,
+    growth: effect.growth,
+    moving: effect.moving,
+    direction: effect.moving ? randomDirection() : null
+  };
+}
+
+function moveGoldenFood() {
+  const food = state.local.food;
+  if (!food || food.type !== "gold") return;
+
+  const occupied = new Set(state.local.snake.map(pointKey));
+  const directions = shuffleDirections(food.direction);
+
+  for (const direction of directions) {
+    const target = { x: food.x + direction.x, y: food.y + direction.y };
+    if (outsideBoard(target) || occupied.has(pointKey(target))) continue;
+    food.x = target.x;
+    food.y = target.y;
+    food.direction = { ...direction };
+    return;
+  }
+
+  food.direction = randomDirection();
+}
+
+function findFreePoint(occupied) {
+  const attempts = state.cols * state.rows;
+  for (let index = 0; index < attempts; index += 1) {
+    const point = {
+      x: 2 + Math.floor(Math.random() * Math.max(1, state.cols - 4)),
+      y: 2 + Math.floor(Math.random() * Math.max(1, state.rows - 4))
+    };
+    if (!occupied.has(pointKey(point))) return point;
+  }
+
+  for (let y = 0; y < state.rows; y += 1) {
+    for (let x = 0; x < state.cols; x += 1) {
+      const point = { x, y };
+      if (!occupied.has(pointKey(point))) return point;
+    }
+  }
+  return { x: Math.floor(state.cols / 2), y: Math.floor(state.rows / 2) };
 }
 
 function joinArena() {
@@ -57,6 +341,7 @@ function joinArena() {
     return;
   }
 
+  state.mode = "public";
   state.desiredName = name;
   state.manualLeave = false;
   localStorage.setItem("serverbloom_snake_name", name);
@@ -68,6 +353,7 @@ function connect() {
   clearTimeout(state.reconnectTimer);
   closeSocket(false);
   setConnection("connecting", "連線中…");
+  $("#latencyText").textContent = "— ms";
 
   try {
     state.socket = new WebSocket(websocketUrl());
@@ -95,6 +381,7 @@ function connect() {
   });
 
   state.socket.addEventListener("close", (event) => {
+    if (state.mode !== "public") return;
     clearInterval(state.pingTimer);
     state.pingTimer = null;
     state.socket = null;
@@ -102,16 +389,17 @@ function connect() {
     state.playerId = "";
     setConnection("error", event.code === 1000 ? "已離線" : "連線中斷");
 
-    if (!state.manualLeave && state.desiredName) {
+    if (!state.manualLeave && state.desiredName && state.mode === "public") {
       setStatus("連線中斷，正在重新加入公開戰局…");
       state.reconnectTimer = setTimeout(connect, 2200);
-    } else {
-      showOverlay("join");
+    } else if (state.mode === "public") {
+      showOverlay("publicJoin");
     }
   });
 
   state.socket.addEventListener("error", () => {
     setConnection("error", "連線失敗");
+    $("#joinButton").disabled = false;
   });
 }
 
@@ -127,6 +415,7 @@ function handleMessage(message) {
       state.playerId = String(message.playerId || "");
       state.joined = true;
       $("#leaveButton").hidden = false;
+      showOverlay("none");
       showToast(String(message.message || "已加入公開戰局"));
       break;
 
@@ -136,6 +425,7 @@ function handleMessage(message) {
       break;
 
     case "state":
+      applyPublicVisualColors(message);
       state.game = message;
       state.cols = Number(message.cols) || state.cols;
       state.rows = Number(message.rows) || state.rows;
@@ -154,7 +444,7 @@ function handleMessage(message) {
       break;
 
     case "left":
-      resetClient();
+      returnToMenu();
       break;
 
     case "error":
@@ -170,8 +460,24 @@ function handleMessage(message) {
   }
 }
 
+function applyPublicVisualColors(nextGame) {
+  const previousGame = state.game;
+  const previousFood = previousGame?.food;
+  const previousScores = new Map((previousGame?.players || []).map((player) => [player.id, Number(player.score || 0)]));
+
+  for (const player of nextGame.players || []) {
+    const oldScore = previousScores.get(player.id);
+    const newScore = Number(player.score || 0);
+    if (oldScore !== undefined && newScore > oldScore && previousFood) {
+      state.publicVisualColors.set(player.id, foodEffect(previousFood).color);
+    }
+    const serverColor = String(player.color || "");
+    player.displayColor = state.publicVisualColors.get(player.id) || serverColor;
+  }
+}
+
 function renderArena() {
-  if (!state.arena) return;
+  if (!state.arena || state.mode !== "public") return;
   renderPlayerList(state.arena.players || []);
 
   const me = (state.arena.players || []).find((player) => player.id === state.playerId);
@@ -209,6 +515,7 @@ function renderArena() {
     const isAlive = me?.status === "alive";
     $("#spectatorBanner").hidden = Boolean(isAlive);
     $("#touchControls").hidden = !isAlive;
+    showOverlay("none");
     setStatus(isAlive
       ? "方向鍵／WASD 控制。撞牆、撞自己或撞其他玩家都會出局。"
       : "你正在觀戰；本局結束後會自動加入下一局。"
@@ -245,7 +552,7 @@ function renderGameUi() {
 
 function renderPlayerList(players) {
   const list = $("#playerList");
-  list.hidden = !state.joined || players.length === 0;
+  list.hidden = state.mode !== "public" || !state.joined || players.length === 0;
   if (list.hidden) return;
 
   const rows = players
@@ -259,9 +566,10 @@ function renderPlayerList(players) {
           : player.status === "spectating"
             ? "觀戰"
             : "待命";
+      const color = player.displayColor || state.publicVisualColors.get(player.id) || player.color;
       return `
         <div class="player-row ${player.id === state.playerId ? "me" : ""}">
-          <span class="player-color" style="--player-color:${escapeAttribute(player.color)}"></span>
+          <span class="player-color" style="--player-color:${escapeAttribute(color)}"></span>
           <span class="player-name">${escapeHtml(player.name)}${player.id === state.playerId ? "（你）" : ""}</span>
           <span class="player-meta">${status}・${Number(player.wins || 0)} 勝</span>
         </div>`;
@@ -285,52 +593,92 @@ function renderResult(result) {
   $("#resultTitle").textContent = String(result.resultText || "戰局結束");
   $("#resultMessage").textContent = result.ranked
     ? won ? "漂亮，你活到最後。下一局所有在線玩家會重新出生。" : "下一局所有在線玩家會重新出生。"
-    : "這局是單人練習，因此不計正式勝負。";
+    : "這局是公開戰局內的單人練習，因此不計正式勝負。";
 
-  $("#resultTable").innerHTML = (result.players || []).map((player, index) => `
-    <div class="result-row">
-      <span class="result-rank">#${index + 1}</span>
-      <span class="player-color" style="--player-color:${escapeAttribute(player.color)}"></span>
-      <span class="result-name">${escapeHtml(player.name)}${player.id === state.playerId ? "（你）" : ""}</span>
-      <span class="result-score">${Number(player.score || 0)} 分・${Number(player.wins || 0)} 勝</span>
-    </div>`).join("");
+  $("#resultTable").innerHTML = (result.players || []).map((player, index) => {
+    const color = state.publicVisualColors.get(player.id) || player.color;
+    return `
+      <div class="result-row">
+        <span class="result-rank">#${index + 1}</span>
+        <span class="player-color" style="--player-color:${escapeAttribute(color)}"></span>
+        <span class="result-name">${escapeHtml(player.name)}${player.id === state.playerId ? "（你）" : ""}</span>
+        <span class="result-score">${Number(player.score || 0)} 分・${Number(player.wins || 0)} 勝</span>
+      </div>`;
+  }).join("");
 
+  $("#nextRoundChip").hidden = false;
+  $("#singleResultActions").hidden = true;
   showOverlay("result");
   playEndSound(won);
 }
 
 function showOverlay(name) {
-  $("#joinOverlay").hidden = name !== "join";
+  $("#modeOverlay").hidden = name !== "mode";
+  $("#publicJoinOverlay").hidden = name !== "publicJoin";
   $("#waitingOverlay").hidden = name !== "waiting";
   $("#resultOverlay").hidden = name !== "result";
 }
 
-function queueDirection(direction) {
+function queueDirection(directionName) {
+  const next = DIRECTIONS[directionName];
+  if (!next) return;
+
+  if (state.mode === "single") {
+    if (!state.local.running || isOpposite(state.local.direction, next)) return;
+    state.local.nextDirection = { ...next };
+    return;
+  }
+
   const me = state.game?.players?.find((player) => player.id === state.playerId);
   if (!me?.alive) return;
-  safeSend({ type: "direction", direction });
+  safeSend({ type: "direction", direction: directionName });
 }
 
-function leaveArena() {
+function leaveCurrentMode() {
+  if (state.mode === "single") {
+    stopLocalGame();
+    returnToMenu();
+    return;
+  }
+
+  if (state.mode === "public") {
+    state.manualLeave = true;
+    safeSend({ type: "leave" });
+    setTimeout(() => closeSocket(true), 100);
+    returnToMenu();
+  }
+}
+
+function returnToMenu() {
+  stopLocalGame();
   state.manualLeave = true;
-  safeSend({ type: "leave" });
-  setTimeout(() => closeSocket(true), 100);
-  resetClient();
-}
-
-function resetClient() {
-  state.joined = false;
-  state.playerId = "";
-  state.arena = null;
-  state.game = null;
-  state.result = null;
+  clearTimeout(state.reconnectTimer);
+  closeSocket(true);
+  state.mode = "menu";
+  resetSharedGameState();
   $("#leaveButton").hidden = true;
   $("#playerList").hidden = true;
   $("#spectatorBanner").hidden = true;
   $("#touchControls").hidden = true;
   $("#joinButton").disabled = false;
-  setStatus("輸入名稱後加入唯一公開戰局。");
-  showOverlay("join");
+  $("#modeLabel").textContent = "選擇遊戲模式";
+  $("#myScore").textContent = "0";
+  $("#aliveCount").textContent = "0 / 0";
+  $("#myWins").textContent = "0";
+  setConnection("idle", "尚未選擇模式");
+  $("#latencyText").textContent = "—";
+  setStatus("選擇單人練習，或進入唯一公開戰局。");
+  showOverlay("mode");
+}
+
+function resetSharedGameState() {
+  state.joined = false;
+  state.playerId = "";
+  state.arena = null;
+  state.game = null;
+  state.result = null;
+  state.lastFoodKey = "";
+  state.publicVisualColors.clear();
 }
 
 function closeSocket(normal) {
@@ -359,8 +707,9 @@ function startPingLoop() {
 
 function setConnection(status, text) {
   const pill = $("#connectionPill");
-  pill.classList.remove("online", "error");
+  pill.classList.remove("online", "local", "error");
   if (status === "online") pill.classList.add("online");
+  if (status === "local") pill.classList.add("local");
   if (status === "error") pill.classList.add("error");
   $("#connectionText").textContent = text;
 }
@@ -374,7 +723,7 @@ function showToast(text) {
   toast.textContent = text;
   toast.classList.add("show");
   clearTimeout(showToast.timer);
-  showToast.timer = setTimeout(() => toast.classList.remove("show"), 2200);
+  showToast.timer = setTimeout(() => toast.classList.remove("show"), 2400);
 }
 
 function resizeCanvas() {
@@ -448,16 +797,19 @@ function drawBackground(time) {
 }
 
 function drawFood(point, time) {
+  const effect = foodEffect(point);
   const center = gridCenter(point);
   const size = Math.min(10.5, state.cell * 0.44);
-  const pulse = 1 + Math.sin(time * 0.006 + point.x + point.y) * 0.08;
+  const pulse = 1 + Math.sin(time * 0.006 + point.x + point.y) * (effect.type === "gold" ? 0.14 : 0.08);
+
   ctx.save();
   ctx.translate(center.x, center.y);
-  ctx.rotate(time * 0.00045 + (point.x - point.y) * 0.08);
+  ctx.rotate(time * (effect.type === "gold" ? 0.0011 : 0.00045) + (point.x - point.y) * 0.08);
   ctx.scale(pulse, pulse);
-  ctx.shadowColor = "#ff72b6";
-  ctx.shadowBlur = 15;
-  ctx.fillStyle = "#ff86c3";
+  ctx.shadowColor = effect.color;
+  ctx.shadowBlur = effect.type === "gold" ? 24 : 15;
+  ctx.fillStyle = effect.color;
+
   for (let petal = 0; petal < 5; petal += 1) {
     ctx.save();
     ctx.rotate(petal * Math.PI * 2 / 5);
@@ -466,16 +818,26 @@ function drawFood(point, time) {
     ctx.fill();
     ctx.restore();
   }
-  ctx.fillStyle = "#fff0a7";
+
+  ctx.fillStyle = effect.center;
   ctx.beginPath();
   ctx.arc(0, 0, size * 0.27, 0, Math.PI * 2);
   ctx.fill();
+
+  if (effect.type === "gold") {
+    ctx.strokeStyle = "rgba(255,255,255,.72)";
+    ctx.lineWidth = Math.max(1, state.cell * 0.06);
+    ctx.beginPath();
+    ctx.arc(0, 0, size * 0.78, 0, Math.PI * 2);
+    ctx.stroke();
+  }
   ctx.restore();
 }
 
 function drawPlayer(player) {
   if (!player.snake?.length) return;
   const direction = player.direction || { x: 1, y: 0 };
+  const playerColor = player.displayColor || state.publicVisualColors.get(player.id) || player.color || FOOD_TYPES.pink.color;
 
   player.snake.slice().reverse().forEach((part, reverseIndex) => {
     const index = player.snake.length - 1 - reverseIndex;
@@ -486,9 +848,9 @@ function drawPlayer(player) {
 
     ctx.save();
     ctx.globalAlpha = player.alive ? 1 : 0.22;
-    ctx.shadowColor = player.color;
+    ctx.shadowColor = playerColor;
     ctx.shadowBlur = isHead ? 16 : 6;
-    ctx.fillStyle = player.color;
+    ctx.fillStyle = playerColor;
     roundedRect(x, y, size, size, isHead ? state.cell * 0.28 : state.cell * 0.22);
     ctx.fill();
 
@@ -513,12 +875,12 @@ function drawPlayer(player) {
         ctx.fill();
       }
 
-      if (state.cell >= 13) {
+      if (state.cell >= 13 && player.name) {
         ctx.font = `700 ${Math.max(10, state.cell * 0.42)}px Inter, sans-serif`;
         ctx.textAlign = "center";
         ctx.textBaseline = "bottom";
         ctx.fillStyle = "rgba(0,0,0,.78)";
-        ctx.fillText(player.name, center.x + 1, y - 4 + 1);
+        ctx.fillText(player.name, center.x + 1, y - 3);
         ctx.fillStyle = "#fff8ff";
         ctx.fillText(player.name, center.x, y - 4);
       }
@@ -543,6 +905,62 @@ function gridCenter(point) {
     x: state.offsetX + point.x * state.cell + state.cell / 2,
     y: state.offsetY + point.y * state.cell + state.cell / 2
   };
+}
+
+function foodEffect(food) {
+  const type = String(food?.type || "pink");
+  const fallback = FOOD_TYPES[type] || FOOD_TYPES.pink;
+  return {
+    ...fallback,
+    color: String(food?.color || fallback.color),
+    center: String(food?.center || fallback.center),
+    score: Number(food?.score || fallback.score),
+    growth: Number(food?.growth || fallback.growth),
+    moving: Boolean(food?.moving ?? fallback.moving)
+  };
+}
+
+function makeSnake(headX, headY, direction, length) {
+  const snake = [];
+  for (let index = 0; index < length; index += 1) {
+    snake.push({
+      x: headX - direction.x * index,
+      y: headY - direction.y * index
+    });
+  }
+  return snake;
+}
+
+function randomDirection() {
+  const values = Object.values(DIRECTIONS);
+  return { ...values[Math.floor(Math.random() * values.length)] };
+}
+
+function shuffleDirections(preferred) {
+  const others = Object.values(DIRECTIONS)
+    .filter((direction) => !sameDirection(direction, preferred))
+    .sort(() => Math.random() - 0.5);
+  return preferred ? [preferred, ...others] : others;
+}
+
+function sameDirection(a, b) {
+  return Boolean(a && b && a.x === b.x && a.y === b.y);
+}
+
+function isOpposite(a, b) {
+  return Boolean(a && b && a.x + b.x === 0 && a.y + b.y === 0);
+}
+
+function samePoint(a, b) {
+  return Boolean(a && b && a.x === b.x && a.y === b.y);
+}
+
+function pointKey(point) {
+  return `${point.x},${point.y}`;
+}
+
+function outsideBoard(point) {
+  return point.x < 0 || point.y < 0 || point.x >= state.cols || point.y >= state.rows;
 }
 
 function sanitizeName(value) {
@@ -595,9 +1013,21 @@ function playTone(frequency, duration, type = "sine", volume = 0.025, delay = 0)
   oscillator.stop(start + duration + 0.02);
 }
 
+function playFoodTone(type) {
+  if (type === "gold") {
+    [760, 980, 1240].forEach((frequency, index) => playTone(frequency, 0.13, "triangle", 0.032, index * 0.045));
+    return;
+  }
+  const frequencies = { pink: 720, lavender: 790, purple: 650 };
+  playTone(frequencies[type] || 720, 0.09, "triangle", 0.022);
+}
+
 function playFoodSoundIfNeeded() {
-  const key = state.game?.food ? `${state.game.food.x},${state.game.food.y}` : "";
-  if (state.lastFoodKey && key && key !== state.lastFoodKey) playTone(720, 0.08, "triangle", 0.02);
+  const food = state.game?.food;
+  const key = food ? String(food.id || `${food.x},${food.y},${food.type || "pink"}`) : "";
+  if (state.lastFoodKey && key && key !== state.lastFoodKey) {
+    playFoodTone(food?.type || "pink");
+  }
   state.lastFoodKey = key;
 }
 
@@ -618,11 +1048,16 @@ async function toggleFullscreen() {
   }
 }
 
+$("#singleModeButton").addEventListener("click", startSinglePractice);
+$("#publicModeButton").addEventListener("click", openPublicJoin);
+$("#publicBackButton").addEventListener("click", returnToMenu);
 $("#joinButton").addEventListener("click", joinArena);
 $("#nameInput").addEventListener("keydown", (event) => {
   if (event.key === "Enter") joinArena();
 });
-$("#leaveButton").addEventListener("click", leaveArena);
+$("#leaveButton").addEventListener("click", leaveCurrentMode);
+$("#singleRestartButton").addEventListener("click", startSinglePractice);
+$("#singleMenuButton").addEventListener("click", returnToMenu);
 $("#fullscreenButton").addEventListener("click", toggleFullscreen);
 $("#soundButton").addEventListener("click", () => {
   state.soundEnabled = !state.soundEnabled;
@@ -667,10 +1102,12 @@ document.addEventListener("fullscreenchange", () => {
 
 window.addEventListener("resize", resizeCanvas);
 window.addEventListener("beforeunload", () => {
+  stopLocalGame();
   state.manualLeave = true;
   if (state.socket?.readyState === WebSocket.OPEN) state.socket.close(1000, "Page closing");
 });
 
 $("#nameInput").value = localStorage.getItem("serverbloom_snake_name") || "";
 resizeCanvas();
+returnToMenu();
 requestAnimationFrame(renderFrame);

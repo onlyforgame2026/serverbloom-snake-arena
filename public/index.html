@@ -4,14 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="theme-color" content="#090411">
-  <meta name="description" content="ServerBloom Snake Arena：所有玩家自動加入同一個公開貪吃蛇戰局。">
+  <meta name="description" content="ServerBloom Snake Arena：本機單人練習與唯一公開多人貪吃蛇戰局。">
   <title>ServerBloom Snake Arena</title>
   <link rel="stylesheet" href="./styles.css">
   <script src="./app.js" defer></script>
 </head>
 <body>
   <main class="app" id="gameApp">
-    <canvas id="gameCanvas" aria-label="ServerBloom 線上多人貪吃蛇遊戲區"></canvas>
+    <canvas id="gameCanvas" aria-label="ServerBloom 貪吃蛇遊戲區"></canvas>
 
     <header class="hud">
       <div class="hud-left">
@@ -19,11 +19,11 @@
           <span class="brand-icon">🌸</span>
           <span class="brand-copy">
             <strong>ServerBloom Snake Arena</strong>
-            <small id="modeLabel">唯一公開戰局</small>
+            <small id="modeLabel">選擇遊戲模式</small>
           </span>
         </section>
 
-        <section class="glass stats" aria-label="戰局資訊">
+        <section class="glass stats" aria-label="遊戲資訊">
           <div class="stat"><small>我的分數</small><strong id="myScore">0</strong></div>
           <div class="stat"><small>存活玩家</small><strong id="aliveCount">0 / 0</strong></div>
           <div class="stat"><small>勝場</small><strong id="myWins">0</strong></div>
@@ -39,8 +39,8 @@
 
     <div class="connection-pill" id="connectionPill">
       <span class="connection-dot"></span>
-      <span id="connectionText">尚未連線</span>
-      <span class="latency" id="latencyText">— ms</span>
+      <span id="connectionText">尚未選擇模式</span>
+      <span class="latency" id="latencyText">—</span>
     </div>
 
     <aside class="glass player-list" id="playerList" hidden aria-label="在線玩家"></aside>
@@ -50,7 +50,7 @@
     </div>
 
     <div class="bottom-status" id="statusText" aria-live="polite">
-      輸入名稱後加入唯一公開戰局。
+      選擇單人練習，或進入唯一公開戰局。
     </div>
 
     <nav class="touch-controls" id="touchControls" hidden aria-label="方向控制">
@@ -60,8 +60,46 @@
       <button class="right" type="button" data-direction="right" aria-label="向右">→</button>
     </nav>
 
-    <section class="overlay" id="joinOverlay">
+    <section class="overlay" id="modeOverlay">
+      <div class="panel mode-panel">
+        <div class="hero-mark" aria-hidden="true">🌸🐍</div>
+        <p class="eyebrow">CHOOSE YOUR MODE</p>
+        <h1>今天要怎麼玩？</h1>
+        <p class="lead">單人模式完全在本機執行；公開戰局則連接 ServerBloom 多人伺服器。</p>
+
+        <div class="mode-grid">
+          <button class="mode-card single" id="singleModeButton" type="button">
+            <span class="mode-icon">🎮</span>
+            <span class="mode-copy">
+              <strong>單人練習</strong>
+              <small>本機立即開始｜不計排名</small>
+            </span>
+            <span class="mode-arrow">→</span>
+          </button>
+
+          <button class="mode-card public" id="publicModeButton" type="button">
+            <span class="mode-icon">🌐</span>
+            <span class="mode-copy">
+              <strong>公開戰局</strong>
+              <small>連接多人伺服器｜2 人以上計勝負</small>
+            </span>
+            <span class="mode-arrow">→</span>
+          </button>
+        </div>
+
+        <div class="food-guide" aria-label="食物效果">
+          <div><span class="food-dot pink"></span><strong>淡粉</strong><small>+1 分・+1 長度</small></div>
+          <div><span class="food-dot lavender"></span><strong>淡紫</strong><small>+1 分・+1 長度</small></div>
+          <div><span class="food-dot deep-purple"></span><strong>深紫</strong><small>+1 分・+1 長度</small></div>
+          <div class="gold-food"><span class="food-dot gold"></span><strong>金色</strong><small>會移動・+3 分・+3 長度</small></div>
+        </div>
+        <p class="micro-copy">吃下哪種顏色的櫻花，整條蛇就會變成那個顏色。</p>
+      </div>
+    </section>
+
+    <section class="overlay" id="publicJoinOverlay" hidden>
       <div class="panel join-panel">
+        <button class="panel-back" id="publicBackButton" type="button">← 返回模式選擇</button>
         <div class="hero-mark" aria-hidden="true">🌸🐍🌐</div>
         <p class="eyebrow">ONE PUBLIC ARENA</p>
         <h1>所有人都在同一場</h1>
@@ -102,7 +140,11 @@
         <h2 id="resultTitle">戰局結束</h2>
         <p class="lead" id="resultMessage">下一局即將開始。</p>
         <div class="result-table" id="resultTable"></div>
-        <div class="next-round-chip">下一局 <strong id="resultCountdown">7</strong> 秒</div>
+        <div class="next-round-chip" id="nextRoundChip">下一局 <strong id="resultCountdown">7</strong> 秒</div>
+        <div class="result-actions" id="singleResultActions" hidden>
+          <button class="secondary-action" id="singleMenuButton" type="button">返回模式選擇</button>
+          <button class="primary-action" id="singleRestartButton" type="button">再玩一次</button>
+        </div>
       </div>
     </section>
 
