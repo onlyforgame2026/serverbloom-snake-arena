@@ -29,6 +29,50 @@ const COLORS = [
   "#79d6ff", "#ffa36d", "#c4ff8a", "#ff91c8", "#9e7cff"
 ];
 
+const GOLD_MOVE_EVERY_TICKS = 4;
+const FOOD_TYPES = Object.freeze({
+  pink: {
+    type: "pink",
+    label: "淡粉櫻花",
+    color: "#ffb7d5",
+    center: "#fff0f7",
+    score: 1,
+    growth: 1,
+    moving: false,
+    weight: 0.32
+  },
+  lavender: {
+    type: "lavender",
+    label: "淡紫櫻花",
+    color: "#c9b3ff",
+    center: "#fff6ff",
+    score: 1,
+    growth: 1,
+    moving: false,
+    weight: 0.28
+  },
+  purple: {
+    type: "purple",
+    label: "深紫櫻花",
+    color: "#6d28d9",
+    center: "#eadcff",
+    score: 1,
+    growth: 1,
+    moving: false,
+    weight: 0.25
+  },
+  gold: {
+    type: "gold",
+    label: "金色櫻花",
+    color: "#f6c453",
+    center: "#fff4b8",
+    score: 3,
+    growth: 3,
+    moving: true,
+    weight: 0.15
+  }
+});
+
 const DIRECTIONS = Object.freeze({
   up: { x: 0, y: -1 },
   down: { x: 0, y: 1 },
@@ -46,7 +90,8 @@ const arena = {
   countdownLastValue: null,
   tickTimer: null,
   countdownTimer: null,
-  lastResult: null
+  lastResult: null,
+  tickCount: 0
 };
 
 const server = http.createServer(async (request, response) => {
@@ -228,6 +273,7 @@ function handleJoin(socket, message) {
     nextDirection: { ...DIRECTIONS.right },
     alive: false,
     score: 0,
+    growthRemaining: 0,
     wins: 0,
     deathReason: ""
   };
@@ -280,6 +326,7 @@ function beginCountdown() {
     player.status = "waiting";
     player.alive = false;
     player.snake = [];
+    player.growthRemaining = 0;
     player.deathReason = "";
   }
 
@@ -319,6 +366,7 @@ function startRound() {
   arena.round += 1;
   arena.mode = participants.length >= 2 ? "ranked" : "practice";
   arena.lastResult = null;
+  arena.tickCount = 0;
 
   const slots = createSpawnSlots(participants.length);
   participants.forEach((player, index) => {
@@ -329,6 +377,7 @@ function startRound() {
     player.alive = true;
     player.status = "alive";
     player.score = 0;
+    player.growthRemaining = 0;
     player.deathReason = "";
   });
 
@@ -359,7 +408,8 @@ function tickGame() {
       y: head.y + player.direction.y
     };
     const growing = samePoint(target, arena.food);
-    plans.set(player.id, { player, head, target, growing });
+    const keepingTail = growing || player.growthRemaining > 0;
+    plans.set(player.id, { player, head, target, growing, keepingTail });
 
     const key = pointKey(target);
     if (!targets.has(key)) targets.set(key, []);
@@ -395,7 +445,7 @@ function tickGame() {
   const occupied = new Map();
   for (const player of alivePlayers) {
     const plan = plans.get(player.id);
-    const keepLength = plan?.growing ? player.snake.length : Math.max(0, player.snake.length - 1);
+    const keepLength = plan?.keepingTail ? player.snake.length : Math.max(0, player.snake.length - 1);
     for (let index = 0; index < keepLength; index += 1) {
       const segment = player.snake[index];
       const key = pointKey(segment);
@@ -427,14 +477,23 @@ function tickGame() {
 
     player.snake.unshift(plan.target);
     if (plan.growing) {
-      player.score += 1;
+      const effect = foodEffect(arena.food);
+      player.score += effect.score;
+      player.color = effect.color;
+      player.growthRemaining += effect.growth;
       foodWasEaten = true;
-    } else {
-      player.snake.pop();
     }
+
+    if (player.growthRemaining > 0) player.growthRemaining -= 1;
+    else player.snake.pop();
   }
 
-  if (foodWasEaten) arena.food = spawnFood();
+  arena.tickCount += 1;
+  if (foodWasEaten) {
+    arena.food = spawnFood();
+  } else if (arena.food?.type === "gold" && arena.tickCount % GOLD_MOVE_EVERY_TICKS === 0) {
+    moveGoldenFood();
+  }
 
   broadcastState();
 
@@ -522,6 +581,7 @@ function resetArenaToWaiting() {
   arena.countdownEndsAt = 0;
   arena.countdownLastValue = null;
   arena.lastResult = null;
+  arena.tickCount = 0;
   broadcastArena();
 }
 
@@ -623,11 +683,75 @@ function makeSnake(headX, headY, direction, length) {
 }
 
 function spawnFood() {
+  const occupied = occupiedCells();
+  const point = findFreePoint(occupied);
+  const effect = pickFoodType();
+
+  return {
+    ...point,
+    id: createId(),
+    type: effect.type,
+    label: effect.label,
+    color: effect.color,
+    center: effect.center,
+    score: effect.score,
+    growth: effect.growth,
+    moving: effect.moving,
+    direction: effect.moving ? randomDirection() : null
+  };
+}
+
+function moveGoldenFood() {
+  const food = arena.food;
+  if (!food || food.type !== "gold") return;
+
+  const occupied = occupiedCells();
+  const directions = shuffleDirections(food.direction);
+
+  for (const direction of directions) {
+    const target = {
+      x: food.x + direction.x,
+      y: food.y + direction.y
+    };
+    if (outsideBoard(target) || occupied.has(pointKey(target))) continue;
+    food.x = target.x;
+    food.y = target.y;
+    food.direction = { ...direction };
+    return;
+  }
+
+  food.direction = randomDirection();
+}
+
+function pickFoodType() {
+  const roll = Math.random();
+  let accumulated = 0;
+  for (const effect of Object.values(FOOD_TYPES)) {
+    accumulated += effect.weight;
+    if (roll < accumulated) return effect;
+  }
+  return FOOD_TYPES.pink;
+}
+
+function foodEffect(food) {
+  const fallback = FOOD_TYPES[String(food?.type || "pink")] || FOOD_TYPES.pink;
+  return {
+    ...fallback,
+    color: String(food?.color || fallback.color),
+    score: Number(food?.score || fallback.score),
+    growth: Number(food?.growth || fallback.growth)
+  };
+}
+
+function occupiedCells() {
   const occupied = new Set();
   for (const player of arena.players.values()) {
     for (const segment of player.snake) occupied.add(pointKey(segment));
   }
+  return occupied;
+}
 
+function findFreePoint(occupied) {
   const attempts = COLS * ROWS;
   for (let index = 0; index < attempts; index += 1) {
     const point = {
@@ -644,7 +768,23 @@ function spawnFood() {
     }
   }
 
-  return null;
+  return { x: Math.floor(COLS / 2), y: Math.floor(ROWS / 2) };
+}
+
+function randomDirection() {
+  const directions = Object.values(DIRECTIONS);
+  return { ...directions[Math.floor(Math.random() * directions.length)] };
+}
+
+function shuffleDirections(preferred) {
+  const others = Object.values(DIRECTIONS)
+    .filter((direction) => !sameDirection(direction, preferred))
+    .sort(() => Math.random() - 0.5);
+  return preferred ? [preferred, ...others] : others;
+}
+
+function sameDirection(a, b) {
+  return Boolean(a && b && a.x === b.x && a.y === b.y);
 }
 
 function pickColor() {
